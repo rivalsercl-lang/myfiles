@@ -253,16 +253,28 @@ end
 local function makeGroupbox(page, side, title)
     local section = page:Section({ Name = title or "Group", Side = side })
     local gb = {}
+
     function gb:AddToggle(flag, opts)   return makeToggle(flag, section, opts or {}) end
     function gb:AddSlider(flag, opts)   return makeSlider(flag, section, opts or {}) end
     function gb:AddDropdown(flag, opts) return makeDropdown(flag, section, opts or {}) end
     function gb:AddInput(flag, opts)    return makeInput(flag, section, opts or {}) end
-    function gb:AddButton(opts)
+
+    -- FIXED: handles both AddButton({Text=..., Func=...}) and AddButton("Name", function() ... end)
+    function gb:AddButton(a, b)
+        local name, cb
+        if type(a) == "table" then
+            name = a.Text or "Button"
+            cb = a.Func
+        else
+            name = a or "Button"
+            cb = b
+        end
         section:Button({
-            Name = opts.Text or "Button",
-            Callback = function() if opts.Func then pcall(opts.Func) end end,
+            Name = name,
+            Callback = function() if cb then pcall(cb) end end,
         })
     end
+
     function gb:AddLabel(text) return makeLabelProxy(section, text) end
     function gb:AddDivider() section:Divider() end
     return gb

@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Inline keybinds, own menu handler.
+-- LinoriaLib API surface over Thugsense. Uses native inline Keybind().
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -27,167 +27,29 @@ local function resolveDefault(opts)
     if type(d) == "number" and opts.Values then return opts.Values[d] end
     return d
 end
+local function toEnumItem(key)
+    if typeof(key) == "EnumItem" then return key end
+    if type(key) ~= "string" or key == "None" or key == "" then return nil end
+    local ok, e = pcall(function() return Enum.KeyCode[key] end)
+    if ok and e then return e end
+    ok, e = pcall(function() return Enum.UserInputType[key] end)
+    if ok and e then return e end
+    return nil
+end
 local function shortName(enumOrString)
     if not enumOrString then return nil end
     local s = tostring(enumOrString)
     return s:match("KeyCode%.(.+)$") or s:match("UserInputType%.(.+)$") or s
 end
 
--- ==================== Keybind registry ====================
-local Keybinds = {}
-local function registerKeybind(proxy) table.insert(Keybinds, proxy) end
-
-local function matchInput(kp, input)
-    local v = kp.Value
-    if v == "None" or v == nil then return false end
-    if type(v) == "string" then
-        return input.KeyCode.Name == v or input.UserInputType.Name == v
-    elseif typeof(v) == "EnumItem" then
-        return input.KeyCode == v or input.UserInputType == v
-    end
-    return false
-end
-
-UIS.InputBegan:Connect(function(input)
-    if UIS:GetFocusedTextBox() then return end
-    for _, kp in ipairs(Keybinds) do
-        if kp._capturing then continue end
-        if matchInput(kp, input) then
-            if kp.Mode == "Toggle" then
-                kp._state = not kp._state
-            elseif kp.Mode == "Hold" or kp.Mode == "Always" then
-                kp._state = true
-            end
-            if kp._syncToggle and kp.Mode == "Toggle" then
-                pcall(function() kp._syncToggle:SetValue(kp._state) end)
-            end
-            fire(kp._callbacks, kp._state)
-            fire(kp._onClick)
-        end
-    end
-end)
-
-UIS.InputEnded:Connect(function(input)
-    for _, kp in ipairs(Keybinds) do
-        if kp.Mode ~= "Hold" then continue end
-        if matchInput(kp, input) then
-            kp._state = false
-            if kp._syncToggle then
-                pcall(function() kp._syncToggle:SetValue(false) end)
-            end
-            fire(kp._callbacks, false)
-        end
-    end
-end)
-
--- ==================== Helpers to locate widget instances ====================
-local function getSectionContent(section)
-    return section and section.Elements
-        and section.Elements.Content
-        and section.Elements.Content.Instance
-end
-
-local function newestChild(content)
-    if not content then return nil end
-    local kids = content:GetChildren()
-    return kids[#kids]
-end
-
--- ==================== Inline bind box ====================
-local function createBindBox(parentInstance, kp)
-    if not parentInstance then return end
-
-    local bindBtn = Instance.new("TextButton")
-    bindBtn.Name = "BindBox"
-    bindBtn.AnchorPoint = Vector2.new(1, 0.5)
-    bindBtn.Position = UDim2.new(1, -4, 0.5, 0)
-    bindBtn.Size = UDim2.new(0, 26, 0, 12)
-    bindBtn.BackgroundColor3 = Thug.Theme.Element
-    bindBtn.BorderSizePixel = 0
-    bindBtn.AutoButtonColor = false
-    bindBtn.Text = ""
-    bindBtn.ZIndex = 10
-    bindBtn.Parent = parentInstance
-
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Thug.Theme.Outline
-    stroke.Thickness = 1
-    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    stroke.Parent = bindBtn
-
-    local label = Instance.new("TextLabel")
-    label.Name = "BindText"
-    label.BackgroundTransparency = 1
-    label.Size = UDim2.new(1, 0, 1, 0)
-    label.FontFace = Thug.Font or Font.new("rbxasset://fonts/families/SourceSansPro.json")
-    label.TextColor3 = Thug.Theme.Text
-    label.TextSize = 10
-    label.Text = kp.Value
-    label.TextXAlignment = Enum.TextXAlignment.Center
-    label.ZIndex = 11
-    label.Parent = bindBtn
-
-    local function refresh()
-        pcall(function()
-            label.Text = kp.Value
-            if kp._capturing then
-                bindBtn.BackgroundColor3 = Thug.Theme.Accent
-                label.TextColor3 = Thug.Theme.Background
-            else
-                bindBtn.BackgroundColor3 = Thug.Theme.Element
-                label.TextColor3 = Thug.Theme.Text
-            end
-        end)
-    end
-
-    local function startCapture()
-        if kp._capturing then return end
-        kp._capturing = true
-        refresh()
-        local captured = false
-        local conn
-        conn = UIS.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.Keyboard then
-                kp:SetValue(input.KeyCode)
-                captured = true
-                conn:Disconnect()
-            elseif input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.MouseButton2
-                or input.UserInputType == Enum.UserInputType.MouseButton3 then
-                kp:SetValue(input.UserInputType)
-                captured = true
-                conn:Disconnect()
-            end
-        end)
-        task.delay(5, function()
-            if not captured then pcall(function() conn:Disconnect() end) end
-            kp._capturing = false
-            refresh()
-        end)
-    end
-
-    bindBtn.Activated:Connect(startCapture)
-    bindBtn.MouseEnter:Connect(function()
-        if not kp._capturing then
-            bindBtn.BackgroundColor3 = Thug.Theme["Hovered Element"]
-        end
-    end)
-    bindBtn.MouseLeave:Connect(function()
-        if not kp._capturing then
-            bindBtn.BackgroundColor3 = Thug.Theme.Element
-        end
-    end)
-
-    kp._bindLabel = label
-    kp._bindBtn = bindBtn
-end
-
 -- ==================== KeyPicker proxy ====================
+-- Wraps the value/state object. The actual UI bind box is created by
+-- calling `handle:Keybind(...)` on the native Thugsense element.
 local function makeKeyPickerProxy(flag, opts)
     opts = opts or {}
     local defaultVal = "None"
     if flag == "MenuKeybind" then
-        defaultVal = opts.Default or "End"
+        defaultVal = shortName(opts.Default) or "End"
     end
 
     local kp = {
@@ -198,9 +60,7 @@ local function makeKeyPickerProxy(flag, opts)
         _onClick = {},
         _onChanged = {},
         _syncToggle = nil,
-        _capturing = false,
-        _bindLabel = nil,
-        _bindBtn = nil,
+        _ext = nil,
     }
     if opts.Callback then table.insert(kp._callbacks, opts.Callback) end
 
@@ -215,16 +75,37 @@ local function makeKeyPickerProxy(flag, opts)
             short = tostring(k)
         end
         self.Value = short
-        if self._bindLabel then
-            pcall(function() self._bindLabel.Text = short end)
-        end
         fire(self._onChanged, short)
     end
     function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
     function kp:OnClick(fn) table.insert(self._onClick, fn) end
 
-    registerKeybind(kp)
     Options[flag] = kp
+    return kp
+end
+
+-- Attach a native :Keybind() to an existing Thugsense element
+local function attachNativeKeybind(handle, kp, opts)
+    opts = opts or {}
+    local ok, ext = pcall(function()
+        return handle:Keybind({
+            Name = opts.Text or "Bind",
+            Flag = opts.Flag or ("Bind_" .. tostring(math.random(1, 1e9))),
+            Default = toEnumItem(opts.Default) or Enum.KeyCode.Z,
+            Mode = opts.Mode or "Toggle",
+            Callback = function(toggled)
+                kp._state = toggled
+                if kp._syncToggle and kp.Mode == "Toggle" then
+                    pcall(function() kp._syncToggle:SetValue(toggled) end)
+                end
+                fire(kp._callbacks, toggled)
+                fire(kp._onClick)
+            end,
+        })
+    end)
+    if ok and ext then
+        kp._ext = ext
+    end
     return kp
 end
 
@@ -270,7 +151,6 @@ local function makeToggle(flag, section, opts)
     local t = { Value = opts.Default == true, _callbacks = {} }
     local setting = false
 
-    local content = getSectionContent(section)
     local handle = section:Toggle({
         Name = opts.Text or flag,
         Flag = flag .. "_thug",
@@ -281,9 +161,6 @@ local function makeToggle(flag, section, opts)
             fire(t._callbacks, v)
         end,
     })
-
-    -- capture the freshly-created toggle row
-    local toggleInstance = newestChild(content)
 
     function t:SetValue(v)
         v = not not v
@@ -302,7 +179,13 @@ local function makeToggle(flag, section, opts)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
         if ko.SyncToggleState then kp._syncToggle = t end
-        createBindBox(toggleInstance, kp)
+        -- Native inline keybind on the toggle row
+        attachNativeKeybind(handle, kp, {
+            Text = ko.Text or (opts.Text or flag),
+            Flag = kf .. "_thug",
+            Default = ko.Default,
+            Mode = ko.Mode,
+        })
         return kp
     end
     function t:AddColorPicker(cf, co)
@@ -422,11 +305,7 @@ local function makeInput(flag, section, opts)
 end
 
 local function makeLabelProxy(section, text)
-    local content = getSectionContent(section)
     local labelObj = section:Label({ Name = tostring(text), Alignment = "Left" })
-    -- the newest child of content is the label's container frame
-    local labelFrame = newestChild(content)
-
     local proxy = {}
 
     function proxy:AddColorPicker(cf, co)
@@ -435,7 +314,12 @@ local function makeLabelProxy(section, text)
     function proxy:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
-        createBindBox(labelFrame, kp)
+        attachNativeKeybind(labelObj, kp, {
+            Text = ko.Text or tostring(text),
+            Flag = kf .. "_thug",
+            Default = ko.Default,
+            Mode = ko.Mode,
+        })
         return kp
     end
     return proxy
@@ -574,13 +458,13 @@ function ThemeManagerShim:SetFolder() end
 function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
--- ==================== Own menu keybind handler ====================
+-- ==================== Menu keybind ====================
+-- Sametlibs' internal check is broken; we handle the menu toggle ourselves.
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     UIS.InputBegan:Connect(function(input)
         if UIS:GetFocusedTextBox() then return end
         if not ThugWindow then return end
-        if Options.MenuKeybind._capturing then return end
         local target = Options.MenuKeybind.Value
         if not target or target == "None" then return end
         local matches = (input.KeyCode.Name == target)

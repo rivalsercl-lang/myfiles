@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Native inline keybinds.
+-- LinoriaLib API surface over Thugsense. Native inline keybinds, working menu key.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -8,7 +8,7 @@ local Thug = loadstring(game:HttpGet(
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 
--- ==================== Lag fix ====================
+-- ==================== Performance: skip per-element tween spam ====================
 do
     local FakeSignal = {}
     FakeSignal.__index = FakeSignal
@@ -29,7 +29,8 @@ do
     Thug.Tween.Time = 0.05
 end
 
--- Set menu keybind to the string form the library checks against
+-- The library's menu check is `tostring(Input.KeyCode) == Library.MenuKeybind`,
+-- so MenuKeybind must be a STRING, not an EnumItem.
 Thug.MenuKeybind = "Enum.KeyCode.End"
 
 getgenv().Toggles = {}
@@ -60,22 +61,23 @@ local function toEnumItem(key)
     if ok and e then return e end
     return nil
 end
-local function shortName(enumOrString)
-    if not enumOrString then return nil end
-    local s = tostring(enumOrString)
+local function shortName(s)
+    if not s then return nil end
+    s = tostring(s)
     return s:match("KeyCode%.(.+)$") or s:match("UserInputType%.(.+)$") or s
 end
 
 -- ==================== KeyPicker proxy ====================
 local function makeKeyPickerProxy(flag, opts)
     opts = opts or {}
-    local defaultVal = "None"
+    local defaultDisplay = "None"
     if flag == "MenuKeybind" then
-        defaultVal = shortName(toEnumItem(opts.Default)) or "End"
+        local e = toEnumItem(opts.Default) or Enum.KeyCode.End
+        defaultDisplay = e.Name
     end
 
     local kp = {
-        Value = defaultVal,
+        Value = defaultDisplay,
         Mode = opts.Mode or "Toggle",
         _state = false,
         _callbacks = {},
@@ -88,21 +90,18 @@ local function makeKeyPickerProxy(flag, opts)
 
     function kp:GetState() return self._state end
     function kp:SetValue(k)
-        local short
+        local e = toEnumItem(k)
         if k == nil or k == "None" or k == "" then
-            short = "None"
-        elseif typeof(k) == "EnumItem" then
-            short = shortName(k)
+            self.Value = "None"
+        elseif e then
+            self.Value = e.Name
         else
-            short = tostring(k)
+            self.Value = tostring(k)
         end
-        self.Value = short
-        -- Drive the native widget too
-        if self._ext then
-            local e = toEnumItem(k)
-            if e then pcall(function() self._ext:Set(e) end) end
+        if self._ext and e then
+            pcall(function() self._ext:Set(e) end)
         end
-        fire(self._onChanged, short)
+        fire(self._onChanged, self.Value)
     end
     function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
     function kp:OnClick(fn) table.insert(self._onClick, fn) end
@@ -111,7 +110,7 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
--- Attach native inline keybind to a returned handle (Toggle or Label object)
+-- Attach a native inline :Keybind() to a Toggle or Label handle.
 local function attachNativeKeybind(handle, flag, opts, kp)
     opts = opts or {}
 
@@ -119,7 +118,8 @@ local function attachNativeKeybind(handle, flag, opts, kp)
     if flag == "MenuKeybind" then
         initialEnum = toEnumItem(opts.Default) or Enum.KeyCode.End
     else
-        initialEnum = Enum.KeyCode.Backspace  -- displays as "None"
+        -- Backspace = the library's "no key" sentinel. Displays as None.
+        initialEnum = Enum.KeyCode.Backspace
     end
 
     local ok, _, ext = pcall(function()
@@ -138,33 +138,48 @@ local function attachNativeKeybind(handle, flag, opts, kp)
             end,
         })
     end)
+
     if not ok or not ext then return end
     kp._ext = ext
 
-    -- Sync the library's menu handler on startup
-    if flag == "MenuKeybind" then
-        Thug.MenuKeybind = ext.Key or "Enum.KeyCode.End"
+    -- Reflect initial state
+    if ext.Key then
+        local display = shortName(ext.Key) or kp.Value
+        if display == "Backspace" then display = "None" end
+        kp.Value = display
     end
 
-    -- Poll for rebinds
+    if flag == "MenuKeybind" and ext.Key then
+        Thug.MenuKeybind = ext.Key
+    end
+
+    -- Watch for rebinds and mode changes
     task.spawn(function()
         local lastKey = ext.Key
+        local lastMode = ext.Mode
         while task.wait(0.2) do
             if not kp._ext then break end
             local k = kp._ext.Key
+            local m = kp._ext.Mode
             if k and k ~= lastKey then
                 lastKey = k
-                kp.Value = shortName(k) or kp.Value
+                local display = shortName(k) or k
+                if display == "Backspace" then display = "None" end
+                kp.Value = display
                 if flag == "MenuKeybind" then
                     Thug.MenuKeybind = k
                 end
-                fire(kp._onChanged, kp.Value)
+                fire(kp._onChanged, display)
+            end
+            if m and m ~= lastMode then
+                lastMode = m
+                kp.Mode = m
             end
         end
     end)
 end
 
--- ==================== Element factories ====================
+-- ==================== Colorpicker proxy ====================
 local makeColorPicker
 
 makeColorPicker = function(flag, section, parentLabel, opts)
@@ -194,14 +209,14 @@ makeColorPicker = function(flag, section, parentLabel, opts)
         return makeColorPicker(cf, self._section, lbl, co)
     end
     function cp:AddKeyPicker(kf, ko)
-        local kp = makeKeyPickerProxy(kf, ko)
-        return kp
+        return makeKeyPickerProxy(kf, ko)
     end
     if opts.Callback then table.insert(cp._callbacks, opts.Callback) end
     Options[flag] = cp
     return cp
 end
 
+-- ==================== Toggle proxy ====================
 local function makeToggle(flag, section, opts)
     opts = opts or {}
     local t = { Value = opts.Default == true, _callbacks = {} }
@@ -231,6 +246,7 @@ local function makeToggle(flag, section, opts)
     function t:SetText(s)
         pcall(function() handle.Elements.Text.Instance.Text = s end)
     end
+
     function t:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
@@ -242,10 +258,13 @@ local function makeToggle(flag, section, opts)
         }, kp)
         return kp
     end
+    t.Keybind = t.AddKeyPicker
+
     function t:AddColorPicker(cf, co)
         local lbl = section:Label({ Name = (co and co.Title) or cf, Alignment = "Left" })
         return makeColorPicker(cf, section, lbl, co)
     end
+    t.Colorpicker = t.AddColorPicker
 
     if opts.Callback then table.insert(t._callbacks, opts.Callback) end
     Toggles[flag] = t
@@ -254,8 +273,10 @@ local function makeToggle(flag, section, opts)
     return t
 end
 
+-- ==================== Slider proxy ====================
 local function makeSlider(flag, section, opts)
     opts = opts or {}
+    -- Guard against Library.Round(Number, 0) → inf/nan
     local decimals = opts.Rounding
     if decimals == nil or decimals == 0 then decimals = 2 end
 
@@ -285,6 +306,7 @@ local function makeSlider(flag, section, opts)
     return s
 end
 
+-- ==================== Dropdown proxy ====================
 local function makeDropdown(flag, section, opts)
     opts = opts or {}
     local values = copy(opts.Values or {})
@@ -334,6 +356,7 @@ local function makeDropdown(flag, section, opts)
     return d
 end
 
+-- ==================== Textbox proxy ====================
 local function makeInput(flag, section, opts)
     opts = opts or {}
     local i = { Value = opts.Default or "", _callbacks = {} }
@@ -358,6 +381,7 @@ local function makeInput(flag, section, opts)
     return i
 end
 
+-- ==================== Label proxy ====================
 local function makeLabelProxy(section, text)
     local labelObj = section:Label({ Name = tostring(text), Alignment = "Left" })
     local proxy = {}
@@ -365,6 +389,8 @@ local function makeLabelProxy(section, text)
     function proxy:AddColorPicker(cf, co)
         return makeColorPicker(cf, section, labelObj, co)
     end
+    proxy.Colorpicker = proxy.AddColorPicker
+
     function proxy:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
@@ -375,9 +401,12 @@ local function makeLabelProxy(section, text)
         }, kp)
         return kp
     end
+    proxy.Keybind = proxy.AddKeyPicker
+
     return proxy
 end
 
+-- ==================== Groupbox / Tab ====================
 local function makeGroupbox(page, side, title)
     local section = page:Section({ Name = title or "Group", Side = side })
     local gb = {}
@@ -433,7 +462,7 @@ local function findWatermarkLabel()
     return nil
 end
 
--- ==================== Shim ====================
+-- ==================== Shim object ====================
 local ThugWindow, Watermark, KeybindList
 local unloadCB = {}
 local Shim = {}
@@ -494,6 +523,7 @@ Shim.ToggleKeybind = nil
 
 getgenv().Library = Shim
 
+-- ==================== Config manager stubs ====================
 local SaveManagerShim = {}
 function SaveManagerShim:SetLibrary() end
 function SaveManagerShim:SetFolder() end
@@ -510,9 +540,5 @@ function ThemeManagerShim:SetLibrary() end
 function ThemeManagerShim:SetFolder() end
 function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
-
-pcall(function()
-    Thug:CreateSettingsPage(ThugWindow, Watermark, KeybindList)
-end)
 
 return Shim

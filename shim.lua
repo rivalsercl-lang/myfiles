@@ -162,6 +162,10 @@ local function makeToggle(flag, section, opts)
 end
 
 local function makeSlider(flag, section, opts)
+    -- Fix: Thugsense's Round() crashes with nan when Decimals == 0.
+    local decimals = opts.Rounding
+    if decimals == nil or decimals == 0 then decimals = 2 end
+
     local s = { Value = opts.Default or 0, _callbacks = {} }
     local handle = section:Slider({
         Name = opts.Text or flag,
@@ -169,7 +173,7 @@ local function makeSlider(flag, section, opts)
         Min = opts.Min or 0,
         Max = opts.Max or 100,
         Default = opts.Default or 0,
-        Decimals = opts.Rounding or 2,
+        Decimals = decimals,
         Suffix = opts.Suffix or "",
         Compact = opts.Compact or false,
         Callback = function(v) s.Value = v; fire(s._callbacks, v) end,
@@ -259,7 +263,7 @@ local function makeGroupbox(page, side, title)
     function gb:AddDropdown(flag, opts) return makeDropdown(flag, section, opts or {}) end
     function gb:AddInput(flag, opts)    return makeInput(flag, section, opts or {}) end
 
-    -- FIXED: handles both AddButton({Text=..., Func=...}) and AddButton("Name", function() ... end)
+    -- Accepts both AddButton({Text=..., Func=...}) and AddButton("Name", fn)
     function gb:AddButton(a, b)
         local name, cb
         if type(a) == "table" then

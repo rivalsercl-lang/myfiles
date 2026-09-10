@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Consolidated final version.
+-- LinoriaLib API surface over Thugsense. Uses native Thugsense keybind widgets.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -27,19 +27,24 @@ local function resolveDefault(opts)
     if type(d) == "number" and opts.Values then return opts.Values[d] end
     return d
 end
-local function toEnum(name)
-    if not name or name == "None" then return nil end
-    local ok, e = pcall(function() return Enum.KeyCode[name] end)
+local function toEnumItem(key)
+    if typeof(key) == "EnumItem" then return key end
+    if type(key) ~= "string" or key == "None" or key == "" then return nil end
+    local ok, e = pcall(function() return Enum.KeyCode[key] end)
     if ok and e then return e end
-    ok, e = pcall(function() return Enum.UserInputType[name] end)
-    if ok then return e end
+    ok, e = pcall(function() return Enum.UserInputType[key] end)
+    if ok and e then return e end
     return nil
 end
+local function shortName(enumOrString)
+    if not enumOrString then return nil end
+    local s = tostring(enumOrString)
+    return s:match("KeyCode%.(.+)$") or s:match("UserInputType%.(.+)$") or s
+end
 
--- Keybind registry
+-- Fallback manual keybind registry (only used when no section is available)
 local Keybinds = {}
 local function registerKeybind(proxy) table.insert(Keybinds, proxy) end
-
 local function matchInput(kp, input)
     local v = kp.Value
     if type(v) == "string" then
@@ -53,14 +58,11 @@ end
 UIS.InputBegan:Connect(function(input)
     if UIS:GetFocusedTextBox() then return end
     for _, kp in ipairs(Keybinds) do
-        if not kp._capturing and matchInput(kp, input) then
+        if matchInput(kp, input) then
             if kp.Mode == "Toggle" then
                 kp._state = not kp._state
             elseif kp.Mode == "Hold" or kp.Mode == "Always" then
                 kp._state = true
-            end
-            if kp._syncToggle then
-                pcall(function() kp._syncToggle:SetValue(kp._state) end)
             end
             fire(kp._callbacks, kp._state)
             fire(kp._onClick)
@@ -73,83 +75,83 @@ UIS.InputEnded:Connect(function(input)
         if kp.Mode ~= "Hold" then continue end
         if matchInput(kp, input) then
             kp._state = false
-            if kp._syncToggle then
-                pcall(function() kp._syncToggle:SetValue(false) end)
-            end
             fire(kp._callbacks, false)
         end
     end
 end)
 
--- Element factories (forward-declare for recursion)
+-- Element factories
 local makeColorPicker, makeKeyPicker
 
-makeKeyPicker = function(flag, section, opts)
+makeKeyPicker = function(flag, host, opts)
     opts = opts or {}
     local kp = {
         Value = opts.Default or "None",
         Mode = opts.Mode or "Toggle",
         _state = false,
-        _callbacks = {},   -- fires on key press with state
-        _onClick = {},     -- fires on key press, no args
-        _onChanged = {},   -- fires on value change (rebind)
+        _callbacks = {},
+        _onClick = {},
+        _onChanged = {},
         _syncToggle = nil,
-        _capturing = false,
-        _button = nil,
+        _ext = nil,
+        _lastKey = nil,
     }
     if opts.Callback then table.insert(kp._callbacks, opts.Callback) end
-    registerKeybind(kp)
 
-    -- Always render a visible bind button so the user can rebind at will
-    if section then
-        local btn = section:Button({
-            Name = "Bind: " .. tostring(kp.Value),
-            Callback = function()
-                if kp._capturing then return end
-                kp._capturing = true
-                pcall(function() btn.Elements.Text.Instance.Text = "Bind: [press key...]" end)
-                task.delay(0.25, function()
-                    local captured = false
-                    local conn
-                    conn = UIS.InputBegan:Connect(function(input)
-                        if input.UserInputType == Enum.UserInputType.Keyboard then
-                            kp:SetValue(input.KeyCode)
-                            captured = true
-                        elseif input.UserInputType == Enum.UserInputType.MouseButton1
-                            or input.UserInputType == Enum.UserInputType.MouseButton2
-                            or input.UserInputType == Enum.UserInputType.MouseButton3 then
-                            kp:SetValue(input.UserInputType)
-                            captured = true
-                        end
-                        if captured then
-                            kp._capturing = false
-                            conn:Disconnect()
-                        end
-                    end)
-                    task.delay(5, function()
-                        if not captured then
-                            kp._capturing = false
-                            pcall(function() conn:Disconnect() end)
-                            pcall(function() btn.Elements.Text.Instance.Text = "Bind: " .. kp.Value end)
-                        end
-                    end)
-                end)
+    -- host is either a Section (we create a new label) or a Label proxy (we use it directly)
+    local hostLabel
+    if host and type(host.Keybind) == "function" then
+        hostLabel = host
+    elseif host then
+        hostLabel = host:Label({ Name = (opts.Text or flag) .. " Bind", Alignment = "Left" })
+    end
+
+    if hostLabel then
+        local _, ext = hostLabel:Keybind({
+            Name = opts.Text or flag,
+            Flag = flag .. "_thug",
+            Default = toEnumItem(opts.Default) or Enum.KeyCode.Z,
+            Mode = opts.Mode or "Toggle",
+            Callback = function(toggled)
+                kp._state = toggled
+                if kp._syncToggle and kp.Mode == "Toggle" then
+                    pcall(function() kp._syncToggle:SetValue(toggled) end)
+                end
+                fire(kp._callbacks, toggled)
+                fire(kp._onClick)
             end,
         })
-        kp._button = btn
+        kp._ext = ext
+
+        -- Poll for rebind so OnChanged can fire
+        task.spawn(function()
+            while task.wait(0.4) do
+                if not kp._ext then break end
+                local stored = Thug.Flags and Thug.Flags[flag .. "_thug"]
+                if stored and stored.Key then
+                    local short = shortName(stored.Key)
+                    if short and short ~= kp._lastKey then
+                        kp._lastKey = short
+                        kp.Value = short
+                        fire(kp._onChanged, short)
+                    end
+                end
+            end
+        end)
+    else
+        -- No native widget: fall back to manual input handling
+        registerKeybind(kp)
     end
 
     function kp:GetState() return self._state end
     function kp:SetValue(k)
-        local newVal
-        if typeof(k) == "EnumItem" then newVal = k.Name
-        elseif k == nil then newVal = "None"
-        else newVal = tostring(k) end
-        self.Value = newVal
-        if kp._button then
-            pcall(function() kp._button.Elements.Text.Instance.Text = "Bind: " .. newVal end)
+        local e = toEnumItem(k)
+        if kp._ext and e then
+            pcall(function() kp._ext:Set(e) end)
         end
-        fire(self._onChanged, newVal)
+        local short = shortName(e) or tostring(k)
+        self.Value = short
+        fire(self._onChanged, short)
     end
     function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
     function kp:OnClick(fn) table.insert(self._onClick, fn) end
@@ -231,8 +233,6 @@ local function makeToggle(flag, section, opts)
     end
 
     if opts.Callback then table.insert(t._callbacks, opts.Callback) end
-
-    -- Register BEFORE firing initial callback
     Toggles[flag] = t
     Options[flag] = t
     if opts.Default ~= nil then fire(t._callbacks, t.Value) end
@@ -344,13 +344,13 @@ local function makeInput(flag, section, opts)
 end
 
 local function makeLabelProxy(section, text)
-    local raw = section:Label({ Name = tostring(text), Alignment = "Left" })
+    local labelObj = section:Label({ Name = tostring(text), Alignment = "Left" })
     local proxy = {}
     function proxy:AddColorPicker(cf, co)
-        return makeColorPicker(cf, section, raw, co)
+        return makeColorPicker(cf, section, labelObj, co)
     end
     function proxy:AddKeyPicker(kf, ko)
-        return makeKeyPicker(kf, section, ko)
+        return makeKeyPicker(kf, labelObj, ko)
     end
     return proxy
 end
@@ -364,7 +364,6 @@ local function makeGroupbox(page, side, title)
     function gb:AddDropdown(flag, opts) return makeDropdown(flag, section, opts) end
     function gb:AddInput(flag, opts)    return makeInput(flag, section, opts) end
 
-    -- Accepts AddButton({Text=..., Func=...}) AND AddButton("Name", fn)
     function gb:AddButton(a, b)
         local name, cb
         if type(a) == "table" then
@@ -397,7 +396,7 @@ local function makeTab(page)
     return tab
 end
 
--- Watermark label finder
+-- Watermark
 local _cachedWatermarkLabel = nil
 local function findWatermarkLabel()
     if not Thug.Holder or not Thug.Holder.Instance then return nil end
@@ -411,7 +410,6 @@ local function findWatermarkLabel()
     return nil
 end
 
--- Public Shim object
 local ThugWindow, Watermark, KeybindList
 local unloadCB = {}
 local Shim = {}
@@ -472,7 +470,6 @@ Shim.ToggleKeybind = nil
 
 getgenv().Library = Shim
 
--- Config manager stubs
 local SaveManagerShim = {}
 function SaveManagerShim:SetLibrary() end
 function SaveManagerShim:SetFolder() end
@@ -490,19 +487,18 @@ function ThemeManagerShim:SetFolder() end
 function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
--- Sync menu keybind after MenuKeybind is created
+-- Sync menu keybind
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     local function sync()
         local v = Options.MenuKeybind.Value
-        local e = toEnum(v)
+        local e = toEnumItem(v)
         if e then Thug.MenuKeybind = e end
     end
     sync()
     Options.MenuKeybind:OnChanged(sync)
 end)
 
--- Fallback Init
 if not Thug.Init then
     function Thug:Init()
         local path = Thug.Folders.Directory .. "/autoload.json"
@@ -513,7 +509,6 @@ if not Thug.Init then
     end
 end
 
--- Bootstrap Thugsense settings tab
 pcall(function()
     Thug:CreateSettingsPage(ThugWindow, Watermark, KeybindList)
 end)

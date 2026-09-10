@@ -1,5 +1,5 @@
 -- shim.lua
--- Compatibility shim: exposes LinoriaLib API surface over Thugsense.
+-- LinoriaLib API surface over Thugsense. Final consolidated version.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -12,6 +12,7 @@ getgenv().Toggles = {}
 getgenv().Options = {}
 local Toggles, Options = getgenv().Toggles, getgenv().Options
 
+-- Utilities
 local function copy(t)
     if type(t) ~= "table" then return t end
     local o = {}
@@ -35,22 +36,32 @@ local function toEnum(name)
     return nil
 end
 
+-- Keybind registry
 local Keybinds = {}
 local function registerKeybind(proxy) table.insert(Keybinds, proxy) end
+
+local function matchInput(kp, input)
+    local v = kp.Value
+    if type(v) == "string" then
+        return input.KeyCode.Name == v or input.UserInputType.Name == v
+    elseif typeof(v) == "EnumItem" then
+        return input.KeyCode == v or input.UserInputType == v
+    end
+    return false
+end
 
 UIS.InputBegan:Connect(function(input)
     if UIS:GetFocusedTextBox() then return end
     for _, kp in ipairs(Keybinds) do
-        local match = false
-        local v = kp.Value
-        if type(v) == "string" then
-            if input.KeyCode.Name == v or input.UserInputType.Name == v then match = true end
-        elseif typeof(v) == "EnumItem" then
-            match = (input.KeyCode == v) or (input.UserInputType == v)
-        end
-        if match then
-            if kp.Mode == "Toggle" then kp._state = not kp._state
-            elseif kp.Mode == "Hold" or kp.Mode == "Always" then kp._state = true end
+        if matchInput(kp, input) then
+            if kp.Mode == "Toggle" then
+                kp._state = not kp._state
+            elseif kp.Mode == "Hold" or kp.Mode == "Always" then
+                kp._state = true
+            end
+            if kp._syncToggle then
+                pcall(function() kp._syncToggle:SetValue(kp._state) end)
+            end
             fire(kp._callbacks, kp._state)
             fire(kp._onClick)
         end
@@ -60,46 +71,58 @@ end)
 UIS.InputEnded:Connect(function(input)
     for _, kp in ipairs(Keybinds) do
         if kp.Mode ~= "Hold" then continue end
-        local v = kp.Value
-        local match = false
-        if type(v) == "string" then
-            if input.KeyCode.Name == v or input.UserInputType.Name == v then match = true end
-        elseif typeof(v) == "EnumItem" then
-            match = (input.KeyCode == v) or (input.UserInputType == v)
-        end
-        if match then
+        if matchInput(kp, input) then
             kp._state = false
+            if kp._syncToggle then
+                pcall(function() kp._syncToggle:SetValue(false) end)
+            end
             fire(kp._callbacks, false)
         end
     end
 end)
 
-local function makeKeyPicker(flag, opts)
+-- Element factories (forward-declare for recursion)
+local makeColorPicker, makeKeyPicker
+
+makeKeyPicker = function(flag, opts)
+    opts = opts or {}
     local kp = {
         Value = opts.Default or "None",
         Mode = opts.Mode or "Toggle",
         _state = false,
-        _callbacks = {},
-        _onClick = {},
+        _callbacks = {},   -- fires on key press with state
+        _onClick = {},     -- fires on key press, no args
+        _onChanged = {},   -- fires on value change with new key
+        _syncToggle = nil,
     }
     if opts.Callback then table.insert(kp._callbacks, opts.Callback) end
     registerKeybind(kp)
 
     function kp:GetState() return self._state end
     function kp:SetValue(k)
-        if typeof(k) == "EnumItem" then self.Value = k.Name
-        elseif k == nil then self.Value = "None"
-        else self.Value = tostring(k) end
+        local newVal
+        if typeof(k) == "EnumItem" then newVal = k.Name
+        elseif k == nil then newVal = "None"
+        else newVal = tostring(k) end
+        if newVal ~= self.Value then
+            self.Value = newVal
+            fire(self._onChanged, newVal)
+        end
     end
-    function kp:OnChanged(fn) table.insert(self._callbacks, fn) end
+    function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
     function kp:OnClick(fn) table.insert(self._onClick, fn) end
 
     Options[flag] = kp
     return kp
 end
 
-local function makeColorPicker(flag, parentLabel, opts)
-    local cp = { Value = opts.Default or Color3.fromRGB(255,255,255), _callbacks = {} }
+makeColorPicker = function(flag, section, parentLabel, opts)
+    opts = opts or {}
+    local cp = {
+        Value = opts.Default or Color3.fromRGB(255,255,255),
+        _callbacks = {},
+        _section = section,
+    }
     local handle = parentLabel:Colorpicker({
         Name = opts.Title or flag,
         Flag = flag .. "_thug",
@@ -115,12 +138,20 @@ local function makeColorPicker(flag, parentLabel, opts)
         fire(self._callbacks, c)
     end
     function cp:OnChanged(fn) table.insert(self._callbacks, fn) end
+    function cp:AddColorPicker(cf, co)
+        local lbl = self._section:Label({ Name = (co and co.Title) or cf, Alignment = "Left" })
+        return makeColorPicker(cf, self._section, lbl, co)
+    end
+    function cp:AddKeyPicker(kf, ko)
+        return makeKeyPicker(kf, ko)
+    end
     if opts.Callback then table.insert(cp._callbacks, opts.Callback) end
     Options[flag] = cp
     return cp
 end
 
 local function makeToggle(flag, section, opts)
+    opts = opts or {}
     local t = { Value = opts.Default == true, _callbacks = {} }
     local setting = false
     local handle = section:Toggle({
@@ -147,22 +178,27 @@ local function makeToggle(flag, section, opts)
     function t:SetText(s)
         pcall(function() handle.Elements.Text.Instance.Text = s end)
     end
-    function t:AddKeyPicker(kf, ko) return makeKeyPicker(kf, ko or {}) end
+    function t:AddKeyPicker(kf, ko)
+        local kp = makeKeyPicker(kf, ko)
+        if ko and ko.SyncToggleState then kp._syncToggle = t end
+        return kp
+    end
     function t:AddColorPicker(cf, co)
         local lbl = section:Label({ Name = (co and co.Title) or cf, Alignment = "Left" })
-        return makeColorPicker(cf, lbl, co or {})
+        return makeColorPicker(cf, section, lbl, co)
     end
 
     if opts.Callback then table.insert(t._callbacks, opts.Callback) end
-    if opts.Default ~= nil then fire(t._callbacks, t.Value) end
 
+    -- Register BEFORE firing initial callback
     Toggles[flag] = t
     Options[flag] = t
+    if opts.Default ~= nil then fire(t._callbacks, t.Value) end
     return t
 end
 
 local function makeSlider(flag, section, opts)
-    -- Fix: Thugsense's Round() crashes with nan when Decimals == 0.
+    opts = opts or {}
     local decimals = opts.Rounding
     if decimals == nil or decimals == 0 then decimals = 2 end
 
@@ -176,7 +212,10 @@ local function makeSlider(flag, section, opts)
         Decimals = decimals,
         Suffix = opts.Suffix or "",
         Compact = opts.Compact or false,
-        Callback = function(v) s.Value = v; fire(s._callbacks, v) end,
+        Callback = function(v)
+            s.Value = v
+            fire(s._callbacks, v)
+        end,
     })
     function s:SetValue(v)
         self.Value = v
@@ -190,16 +229,8 @@ local function makeSlider(flag, section, opts)
 end
 
 local function makeDropdown(flag, section, opts)
+    opts = opts or {}
     local values = copy(opts.Values or {})
-    if opts.SpecialType == "Player" then
-        values = {}
-        for _, p in ipairs(Players:GetPlayers()) do table.insert(values, p.Name) end
-        Players.PlayerAdded:Connect(function(p) table.insert(values, p.Name) end)
-        Players.PlayerRemoving:Connect(function(p)
-            for i, n in ipairs(values) do if n == p.Name then table.remove(values, i) break end end
-        end)
-    end
-
     local d = { Value = resolveDefault(opts), _callbacks = {}, _values = values }
     local handle = section:Dropdown({
         Name = opts.Text or flag,
@@ -207,8 +238,29 @@ local function makeDropdown(flag, section, opts)
         Items = values,
         Default = d.Value,
         Multi = opts.Multi or false,
-        Callback = function(v) d.Value = v; fire(d._callbacks, v) end,
+        Callback = function(v)
+            d.Value = v
+            fire(d._callbacks, v)
+        end,
     })
+
+    if opts.SpecialType == "Player" then
+        values = {}
+        for _, p in ipairs(Players:GetPlayers()) do table.insert(values, p.Name) end
+        d._values = values
+        pcall(function() handle:Refresh(values) end)
+        Players.PlayerAdded:Connect(function(p)
+            table.insert(values, p.Name)
+            pcall(function() handle:Refresh(values) end)
+        end)
+        Players.PlayerRemoving:Connect(function(p)
+            for i, n in ipairs(values) do
+                if n == p.Name then table.remove(values, i) break end
+            end
+            pcall(function() handle:Refresh(values) end)
+        end)
+    end
+
     function d:SetValue(v)
         self.Value = v
         pcall(function() handle:Set(v) end)
@@ -226,13 +278,17 @@ local function makeDropdown(flag, section, opts)
 end
 
 local function makeInput(flag, section, opts)
+    opts = opts or {}
     local i = { Value = opts.Default or "", _callbacks = {} }
     local handle = section:Textbox({
         Name = opts.Text or flag,
         Flag = flag .. "_thug",
         Default = opts.Default or "",
         Placeholder = opts.Placeholder or "",
-        Callback = function(v) i.Value = v; fire(i._callbacks, v) end,
+        Callback = function(v)
+            i.Value = v
+            fire(i._callbacks, v)
+        end,
     })
     function i:SetValue(v)
         self.Value = v
@@ -249,10 +305,10 @@ local function makeLabelProxy(section, text)
     local raw = section:Label({ Name = tostring(text), Alignment = "Left" })
     local proxy = {}
     function proxy:AddColorPicker(cf, co)
-        return makeColorPicker(cf, raw, co or {})
+        return makeColorPicker(cf, section, raw, co)
     end
     function proxy:AddKeyPicker(kf, ko)
-        return makeKeyPicker(kf, ko or {})
+        return makeKeyPicker(kf, ko)
     end
     return proxy
 end
@@ -261,12 +317,12 @@ local function makeGroupbox(page, side, title)
     local section = page:Section({ Name = title or "Group", Side = side })
     local gb = {}
 
-    function gb:AddToggle(flag, opts)   return makeToggle(flag, section, opts or {}) end
-    function gb:AddSlider(flag, opts)   return makeSlider(flag, section, opts or {}) end
-    function gb:AddDropdown(flag, opts) return makeDropdown(flag, section, opts or {}) end
-    function gb:AddInput(flag, opts)    return makeInput(flag, section, opts or {}) end
+    function gb:AddToggle(flag, opts)   return makeToggle(flag, section, opts) end
+    function gb:AddSlider(flag, opts)   return makeSlider(flag, section, opts) end
+    function gb:AddDropdown(flag, opts) return makeDropdown(flag, section, opts) end
+    function gb:AddInput(flag, opts)    return makeInput(flag, section, opts) end
 
-    -- Accepts both AddButton({Text=..., Func=...}) and AddButton("Name", fn)
+    -- Accepts AddButton({Text=..., Func=...}) AND AddButton("Name", fn)
     function gb:AddButton(a, b)
         local name, cb
         if type(a) == "table" then
@@ -299,11 +355,27 @@ local function makeTab(page)
     return tab
 end
 
+-- Watermark label finder (Thugsense doesn't expose internal Items)
+local _cachedWatermarkLabel = nil
+local function findWatermarkLabel()
+    if not Thug.Holder or not Thug.Holder.Instance then return nil end
+    for _, child in ipairs(Thug.Holder.Instance:GetChildren()) do
+        if child:IsA("Frame") and child.Position == UDim2.new(0, 15, 0, 15) then
+            for _, sub in ipairs(child:GetChildren()) do
+                if sub:IsA("TextLabel") then return sub end
+            end
+        end
+    end
+    return nil
+end
+
+-- Public Shim object
 local ThugWindow, Watermark, KeybindList
 local unloadCB = {}
 local Shim = {}
 
 function Shim:CreateWindow(opts)
+    opts = opts or {}
     ThugWindow = Thug:Window({
         Name = opts.Title or "Menu",
         Size = UDim2.new(0, 500, 0, 600),
@@ -313,6 +385,10 @@ function Shim:CreateWindow(opts)
     KeybindList = Thug:KeybindList()
     Watermark:SetVisibility(false)
     KeybindList:SetVisibility(false)
+
+    task.defer(function()
+        _cachedWatermarkLabel = findWatermarkLabel()
+    end)
 
     local api = {}
     function api:AddTab(name)
@@ -327,13 +403,13 @@ function Shim:Notify(text, duration)
 end
 
 function Shim:SetWatermark(text)
-    if Watermark then
-        pcall(function()
-            if Watermark.Elements and Watermark.Elements.Title then
-                Watermark.Elements.Title.Instance.Text = tostring(text)
-            end
-        end)
-        Watermark:SetVisibility(true)
+    if not Watermark then return end
+    Watermark:SetVisibility(true)
+    if not _cachedWatermarkLabel or not _cachedWatermarkLabel.Parent then
+        _cachedWatermarkLabel = findWatermarkLabel()
+    end
+    if _cachedWatermarkLabel then
+        pcall(function() _cachedWatermarkLabel.Text = tostring(text) end)
     end
 end
 
@@ -354,6 +430,7 @@ Shim.ToggleKeybind = nil
 
 getgenv().Library = Shim
 
+-- Config manager stubs
 local SaveManagerShim = {}
 function SaveManagerShim:SetLibrary() end
 function SaveManagerShim:SetFolder() end
@@ -371,6 +448,7 @@ function ThemeManagerShim:SetFolder() end
 function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
+-- Sync menu keybind after MenuKeybind is created
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     local function sync()
@@ -382,6 +460,7 @@ task.spawn(function()
     Options.MenuKeybind:OnChanged(sync)
 end)
 
+-- Fallback Init
 if not Thug.Init then
     function Thug:Init()
         local path = Thug.Folders.Directory .. "/autoload.json"
@@ -392,6 +471,7 @@ if not Thug.Init then
     end
 end
 
+-- Bootstrap Thugsense settings tab
 pcall(function()
     Thug:CreateSettingsPage(ThugWindow, Watermark, KeybindList)
 end)

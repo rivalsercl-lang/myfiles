@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Snap-based tab switches (no lag spikes).
+-- LinoriaLib API surface over Thugsense. Snap tabs, native inline keybinds, working menu key.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -9,24 +9,16 @@ local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 
 -- ==================== Lag fix: skip per-element tweens ====================
--- sametlibs fades every descendant of a page on tab switch. With hundreds of
--- elements that's hundreds of TweenService:Create calls per click = spike.
--- Replace FadeItem with a snap version that does nothing (visibility is
--- toggled on the parent frame by the library code anyway).
 do
     local FakeSignal = {}
     FakeSignal.__index = FakeSignal
-    function FakeSignal.new()
-        return setmetatable({}, FakeSignal)
-    end
+    function FakeSignal.new() return setmetatable({}, FakeSignal) end
     function FakeSignal:Connect(cb)
         task.defer(function() pcall(cb) end)
         return { Disconnect = function() end, Connected = true }
     end
 
     Thug.FadeItem = function(self, Item, Property, Visibility, Speed)
-        -- Do NOT touch transparency. Just return a signal that fires next frame
-        -- so the caller's post-fade callback still runs.
         return {
             Tween = { Completed = FakeSignal.new() },
             Info = nil,
@@ -34,7 +26,6 @@ do
         }
     end
 
-    -- Shorten the fade speed used elsewhere (colorpicker open/close) too
     Thug.Tween.Time = 0.05
 end
 
@@ -112,12 +103,14 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
+-- Attach native keybind AND poll for rebinds so kp.Value stays in sync.
 local function attachNativeKeybind(handle, kp, opts)
     opts = opts or {}
+    local flagKey = opts.Flag or ("Bind_" .. tostring(math.random(1, 1e9)))
     local ok, ext = pcall(function()
         return handle:Keybind({
             Name = opts.Text or "Bind",
-            Flag = opts.Flag or ("Bind_" .. tostring(math.random(1, 1e9))),
+            Flag = flagKey,
             Default = opts.Default or Enum.KeyCode.Backspace,
             Mode = opts.Mode or "Toggle",
             Callback = function(toggled)
@@ -132,6 +125,24 @@ local function attachNativeKeybind(handle, kp, opts)
     end)
     if ok and ext then
         kp._ext = ext
+        -- Poll for rebinds and reflect into kp.Value / _onChanged
+        task.spawn(function()
+            local lastKey = kp.Value
+            while task.wait(0.3) do
+                if not kp._ext then break end
+                local stored = Thug.Flags and Thug.Flags[flagKey]
+                if stored and stored.Key then
+                    local short = shortName(stored.Key)
+                    -- Backspace is sametlibs' "no key" sentinel
+                    if short == "Backspace" then short = "None" end
+                    if short and short ~= lastKey then
+                        lastKey = short
+                        kp.Value = short
+                        fire(kp._onChanged, short)
+                    end
+                end
+            end
+        end)
     end
     return kp
 end
@@ -428,7 +439,7 @@ function Shim:CreateWindow(opts)
     ThugWindow = Thug:Window({
         Name = opts.Title or "Menu",
         Size = UDim2.new(0, 500, 0, 600),
-        FadeSpeed = 0.05,  -- reduced from 0.25
+        FadeSpeed = 0.05,
     })
     Watermark   = Thug:Watermark(opts.Title or "Menu")
     KeybindList = Thug:KeybindList()
@@ -497,6 +508,8 @@ function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
 -- ==================== Menu keybind ====================
+-- sametlibs' internal menu toggle is broken (string vs EnumItem compare),
+-- so we handle it ourselves using Options.MenuKeybind.Value.
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     UIS.InputBegan:Connect(function(input)

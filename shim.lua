@@ -43,8 +43,6 @@ local function shortName(enumOrString)
 end
 
 -- ==================== KeyPicker proxy ====================
--- Wraps the value/state object. The actual UI bind box is created by
--- calling `handle:Keybind(...)` on the native Thugsense element.
 local function makeKeyPickerProxy(flag, opts)
     opts = opts or {}
     local defaultVal = "None"
@@ -91,7 +89,7 @@ local function attachNativeKeybind(handle, kp, opts)
         return handle:Keybind({
             Name = opts.Text or "Bind",
             Flag = opts.Flag or ("Bind_" .. tostring(math.random(1, 1e9))),
-            Default = toEnumItem(opts.Default) or Enum.KeyCode.Z,
+            Default = opts.Default or Enum.KeyCode.Backspace,
             Mode = opts.Mode or "Toggle",
             Callback = function(toggled)
                 kp._state = toggled
@@ -179,11 +177,16 @@ local function makeToggle(flag, section, opts)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
         if ko.SyncToggleState then kp._syncToggle = t end
-        -- Native inline keybind on the toggle row
+        local startKey
+        if kf == "MenuKeybind" then
+            startKey = toEnumItem(ko.Default) or Enum.KeyCode.End
+        else
+            startKey = Enum.KeyCode.Backspace  -- displays as "None"
+        end
         attachNativeKeybind(handle, kp, {
             Text = ko.Text or (opts.Text or flag),
             Flag = kf .. "_thug",
-            Default = ko.Default,
+            Default = startKey,
             Mode = ko.Mode,
         })
         return kp
@@ -314,10 +317,16 @@ local function makeLabelProxy(section, text)
     function proxy:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
+        local startKey
+        if kf == "MenuKeybind" then
+            startKey = toEnumItem(ko.Default) or Enum.KeyCode.End
+        else
+            startKey = Enum.KeyCode.Backspace
+        end
         attachNativeKeybind(labelObj, kp, {
             Text = ko.Text or tostring(text),
             Flag = kf .. "_thug",
-            Default = ko.Default,
+            Default = startKey,
             Mode = ko.Mode,
         })
         return kp
@@ -459,7 +468,6 @@ function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
 -- ==================== Menu keybind ====================
--- Sametlibs' internal check is broken; we handle the menu toggle ourselves.
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     UIS.InputBegan:Connect(function(input)

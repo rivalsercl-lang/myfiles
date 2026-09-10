@@ -80,10 +80,25 @@ UIS.InputEnded:Connect(function(input)
     end
 end)
 
+-- ==================== Helpers to locate widget instances ====================
+local function getSectionContent(section)
+    return section and section.Elements
+        and section.Elements.Content
+        and section.Elements.Content.Instance
+end
+
+local function newestChild(content)
+    if not content then return nil end
+    local kids = content:GetChildren()
+    return kids[#kids]
+end
+
 -- ==================== Inline bind box ====================
 local function createBindBox(parentInstance, kp)
+    if not parentInstance then return end
+
     local bindBtn = Instance.new("TextButton")
-    bindBtn.Name = "\0"
+    bindBtn.Name = "BindBox"
     bindBtn.AnchorPoint = Vector2.new(1, 0.5)
     bindBtn.Position = UDim2.new(1, -4, 0.5, 0)
     bindBtn.Size = UDim2.new(0, 26, 0, 12)
@@ -91,7 +106,7 @@ local function createBindBox(parentInstance, kp)
     bindBtn.BorderSizePixel = 0
     bindBtn.AutoButtonColor = false
     bindBtn.Text = ""
-    bindBtn.ZIndex = 5
+    bindBtn.ZIndex = 10
     bindBtn.Parent = parentInstance
 
     local stroke = Instance.new("UIStroke")
@@ -101,7 +116,7 @@ local function createBindBox(parentInstance, kp)
     stroke.Parent = bindBtn
 
     local label = Instance.new("TextLabel")
-    label.Name = "\0"
+    label.Name = "BindText"
     label.BackgroundTransparency = 1
     label.Size = UDim2.new(1, 0, 1, 0)
     label.FontFace = Thug.Font or Font.new("rbxasset://fonts/families/SourceSansPro.json")
@@ -109,7 +124,7 @@ local function createBindBox(parentInstance, kp)
     label.TextSize = 10
     label.Text = kp.Value
     label.TextXAlignment = Enum.TextXAlignment.Center
-    label.ZIndex = 6
+    label.ZIndex = 11
     label.Parent = bindBtn
 
     local function refresh()
@@ -254,6 +269,8 @@ local function makeToggle(flag, section, opts)
     opts = opts or {}
     local t = { Value = opts.Default == true, _callbacks = {} }
     local setting = false
+
+    local content = getSectionContent(section)
     local handle = section:Toggle({
         Name = opts.Text or flag,
         Flag = flag .. "_thug",
@@ -264,6 +281,9 @@ local function makeToggle(flag, section, opts)
             fire(t._callbacks, v)
         end,
     })
+
+    -- capture the freshly-created toggle row
+    local toggleInstance = newestChild(content)
 
     function t:SetValue(v)
         v = not not v
@@ -282,12 +302,7 @@ local function makeToggle(flag, section, opts)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
         if ko.SyncToggleState then kp._syncToggle = t end
-        local toggleInstance = handle.Elements
-            and handle.Elements.Toggle
-            and handle.Elements.Toggle.Instance
-        if toggleInstance then
-            createBindBox(toggleInstance, kp)
-        end
+        createBindBox(toggleInstance, kp)
         return kp
     end
     function t:AddColorPicker(cf, co)
@@ -407,7 +422,11 @@ local function makeInput(flag, section, opts)
 end
 
 local function makeLabelProxy(section, text)
+    local content = getSectionContent(section)
     local labelObj = section:Label({ Name = tostring(text), Alignment = "Left" })
+    -- the newest child of content is the label's container frame
+    local labelFrame = newestChild(content)
+
     local proxy = {}
 
     function proxy:AddColorPicker(cf, co)
@@ -416,12 +435,7 @@ local function makeLabelProxy(section, text)
     function proxy:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
-        local labelInstance = labelObj.Elements
-            and labelObj.Elements.Label
-            and labelObj.Elements.Label.Instance
-        if labelInstance then
-            createBindBox(labelInstance, kp)
-        end
+        createBindBox(labelFrame, kp)
         return kp
     end
     return proxy
@@ -561,8 +575,6 @@ function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
 
 -- ==================== Own menu keybind handler ====================
--- sametlibs' internal check is broken (compares string to EnumItem), so we
--- handle the menu toggle ourselves based on Options.MenuKeybind.Value.
 task.spawn(function()
     while not Options.MenuKeybind do task.wait(0.1) end
     UIS.InputBegan:Connect(function(input)

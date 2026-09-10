@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Final consolidated version.
+-- LinoriaLib API surface over Thugsense. Consolidated final version.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -53,7 +53,7 @@ end
 UIS.InputBegan:Connect(function(input)
     if UIS:GetFocusedTextBox() then return end
     for _, kp in ipairs(Keybinds) do
-        if matchInput(kp, input) then
+        if not kp._capturing and matchInput(kp, input) then
             if kp.Mode == "Toggle" then
                 kp._state = not kp._state
             elseif kp.Mode == "Hold" or kp.Mode == "Always" then
@@ -84,7 +84,7 @@ end)
 -- Element factories (forward-declare for recursion)
 local makeColorPicker, makeKeyPicker
 
-makeKeyPicker = function(flag, opts)
+makeKeyPicker = function(flag, section, opts)
     opts = opts or {}
     local kp = {
         Value = opts.Default or "None",
@@ -92,11 +92,52 @@ makeKeyPicker = function(flag, opts)
         _state = false,
         _callbacks = {},   -- fires on key press with state
         _onClick = {},     -- fires on key press, no args
-        _onChanged = {},   -- fires on value change with new key
+        _onChanged = {},   -- fires on value change (rebind)
         _syncToggle = nil,
+        _capturing = false,
+        _button = nil,
     }
     if opts.Callback then table.insert(kp._callbacks, opts.Callback) end
     registerKeybind(kp)
+
+    -- Always render a visible bind button so the user can rebind at will
+    if section then
+        local btn = section:Button({
+            Name = "Bind: " .. tostring(kp.Value),
+            Callback = function()
+                if kp._capturing then return end
+                kp._capturing = true
+                pcall(function() btn.Elements.Text.Instance.Text = "Bind: [press key...]" end)
+                task.delay(0.25, function()
+                    local captured = false
+                    local conn
+                    conn = UIS.InputBegan:Connect(function(input)
+                        if input.UserInputType == Enum.UserInputType.Keyboard then
+                            kp:SetValue(input.KeyCode)
+                            captured = true
+                        elseif input.UserInputType == Enum.UserInputType.MouseButton1
+                            or input.UserInputType == Enum.UserInputType.MouseButton2
+                            or input.UserInputType == Enum.UserInputType.MouseButton3 then
+                            kp:SetValue(input.UserInputType)
+                            captured = true
+                        end
+                        if captured then
+                            kp._capturing = false
+                            conn:Disconnect()
+                        end
+                    end)
+                    task.delay(5, function()
+                        if not captured then
+                            kp._capturing = false
+                            pcall(function() conn:Disconnect() end)
+                            pcall(function() btn.Elements.Text.Instance.Text = "Bind: " .. kp.Value end)
+                        end
+                    end)
+                end)
+            end,
+        })
+        kp._button = btn
+    end
 
     function kp:GetState() return self._state end
     function kp:SetValue(k)
@@ -104,10 +145,11 @@ makeKeyPicker = function(flag, opts)
         if typeof(k) == "EnumItem" then newVal = k.Name
         elseif k == nil then newVal = "None"
         else newVal = tostring(k) end
-        if newVal ~= self.Value then
-            self.Value = newVal
-            fire(self._onChanged, newVal)
+        self.Value = newVal
+        if kp._button then
+            pcall(function() kp._button.Elements.Text.Instance.Text = "Bind: " .. newVal end)
         end
+        fire(self._onChanged, newVal)
     end
     function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
     function kp:OnClick(fn) table.insert(self._onClick, fn) end
@@ -143,7 +185,7 @@ makeColorPicker = function(flag, section, parentLabel, opts)
         return makeColorPicker(cf, self._section, lbl, co)
     end
     function cp:AddKeyPicker(kf, ko)
-        return makeKeyPicker(kf, ko)
+        return makeKeyPicker(kf, self._section, ko)
     end
     if opts.Callback then table.insert(cp._callbacks, opts.Callback) end
     Options[flag] = cp
@@ -179,7 +221,7 @@ local function makeToggle(flag, section, opts)
         pcall(function() handle.Elements.Text.Instance.Text = s end)
     end
     function t:AddKeyPicker(kf, ko)
-        local kp = makeKeyPicker(kf, ko)
+        local kp = makeKeyPicker(kf, section, ko)
         if ko and ko.SyncToggleState then kp._syncToggle = t end
         return kp
     end
@@ -308,7 +350,7 @@ local function makeLabelProxy(section, text)
         return makeColorPicker(cf, section, raw, co)
     end
     function proxy:AddKeyPicker(kf, ko)
-        return makeKeyPicker(kf, ko)
+        return makeKeyPicker(kf, section, ko)
     end
     return proxy
 end
@@ -355,7 +397,7 @@ local function makeTab(page)
     return tab
 end
 
--- Watermark label finder (Thugsense doesn't expose internal Items)
+-- Watermark label finder
 local _cachedWatermarkLabel = nil
 local function findWatermarkLabel()
     if not Thug.Holder or not Thug.Holder.Instance then return nil end

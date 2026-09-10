@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Snap tabs, native inline keybinds, working menu key.
+-- LinoriaLib API surface over Thugsense. Native inline keybinds.
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -8,7 +8,7 @@ local Thug = loadstring(game:HttpGet(
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 
--- ==================== Lag fix: skip per-element tweens ====================
+-- ==================== Lag fix ====================
 do
     local FakeSignal = {}
     FakeSignal.__index = FakeSignal
@@ -28,6 +28,9 @@ do
 
     Thug.Tween.Time = 0.05
 end
+
+-- Set menu keybind to the string form the library checks against
+Thug.MenuKeybind = "Enum.KeyCode.End"
 
 getgenv().Toggles = {}
 getgenv().Options = {}
@@ -68,7 +71,7 @@ local function makeKeyPickerProxy(flag, opts)
     opts = opts or {}
     local defaultVal = "None"
     if flag == "MenuKeybind" then
-        defaultVal = shortName(opts.Default) or "End"
+        defaultVal = shortName(toEnumItem(opts.Default)) or "End"
     end
 
     local kp = {
@@ -94,6 +97,11 @@ local function makeKeyPickerProxy(flag, opts)
             short = tostring(k)
         end
         self.Value = short
+        -- Drive the native widget too
+        if self._ext then
+            local e = toEnumItem(k)
+            if e then pcall(function() self._ext:Set(e) end) end
+        end
         fire(self._onChanged, short)
     end
     function kp:OnChanged(fn) table.insert(self._onChanged, fn) end
@@ -103,15 +111,22 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
--- Attach native keybind AND poll for rebinds so kp.Value stays in sync.
-local function attachNativeKeybind(handle, kp, opts)
+-- Attach native inline keybind to a returned handle (Toggle or Label object)
+local function attachNativeKeybind(handle, flag, opts, kp)
     opts = opts or {}
-    local flagKey = opts.Flag or ("Bind_" .. tostring(math.random(1, 1e9)))
-    local ok, ext = pcall(function()
+
+    local initialEnum
+    if flag == "MenuKeybind" then
+        initialEnum = toEnumItem(opts.Default) or Enum.KeyCode.End
+    else
+        initialEnum = Enum.KeyCode.Backspace  -- displays as "None"
+    end
+
+    local ok, _, ext = pcall(function()
         return handle:Keybind({
             Name = opts.Text or "Bind",
-            Flag = flagKey,
-            Default = opts.Default or Enum.KeyCode.Backspace,
+            Flag = flag .. "_thug",
+            Default = initialEnum,
             Mode = opts.Mode or "Toggle",
             Callback = function(toggled)
                 kp._state = toggled
@@ -123,28 +138,30 @@ local function attachNativeKeybind(handle, kp, opts)
             end,
         })
     end)
-    if ok and ext then
-        kp._ext = ext
-        -- Poll for rebinds and reflect into kp.Value / _onChanged
-        task.spawn(function()
-            local lastKey = kp.Value
-            while task.wait(0.3) do
-                if not kp._ext then break end
-                local stored = Thug.Flags and Thug.Flags[flagKey]
-                if stored and stored.Key then
-                    local short = shortName(stored.Key)
-                    -- Backspace is sametlibs' "no key" sentinel
-                    if short == "Backspace" then short = "None" end
-                    if short and short ~= lastKey then
-                        lastKey = short
-                        kp.Value = short
-                        fire(kp._onChanged, short)
-                    end
-                end
-            end
-        end)
+    if not ok or not ext then return end
+    kp._ext = ext
+
+    -- Sync the library's menu handler on startup
+    if flag == "MenuKeybind" then
+        Thug.MenuKeybind = ext.Key or "Enum.KeyCode.End"
     end
-    return kp
+
+    -- Poll for rebinds
+    task.spawn(function()
+        local lastKey = ext.Key
+        while task.wait(0.2) do
+            if not kp._ext then break end
+            local k = kp._ext.Key
+            if k and k ~= lastKey then
+                lastKey = k
+                kp.Value = shortName(k) or kp.Value
+                if flag == "MenuKeybind" then
+                    Thug.MenuKeybind = k
+                end
+                fire(kp._onChanged, kp.Value)
+            end
+        end
+    end)
 end
 
 -- ==================== Element factories ====================
@@ -177,7 +194,8 @@ makeColorPicker = function(flag, section, parentLabel, opts)
         return makeColorPicker(cf, self._section, lbl, co)
     end
     function cp:AddKeyPicker(kf, ko)
-        return makeKeyPickerProxy(kf, ko)
+        local kp = makeKeyPickerProxy(kf, ko)
+        return kp
     end
     if opts.Callback then table.insert(cp._callbacks, opts.Callback) end
     Options[flag] = cp
@@ -217,18 +235,11 @@ local function makeToggle(flag, section, opts)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
         if ko.SyncToggleState then kp._syncToggle = t end
-        local startKey
-        if kf == "MenuKeybind" then
-            startKey = toEnumItem(ko.Default) or Enum.KeyCode.End
-        else
-            startKey = Enum.KeyCode.Backspace
-        end
-        attachNativeKeybind(handle, kp, {
+        attachNativeKeybind(handle, kf, {
             Text = ko.Text or (opts.Text or flag),
-            Flag = kf .. "_thug",
-            Default = startKey,
+            Default = ko.Default,
             Mode = ko.Mode,
-        })
+        }, kp)
         return kp
     end
     function t:AddColorPicker(cf, co)
@@ -357,18 +368,11 @@ local function makeLabelProxy(section, text)
     function proxy:AddKeyPicker(kf, ko)
         ko = ko or {}
         local kp = makeKeyPickerProxy(kf, ko)
-        local startKey
-        if kf == "MenuKeybind" then
-            startKey = toEnumItem(ko.Default) or Enum.KeyCode.End
-        else
-            startKey = Enum.KeyCode.Backspace
-        end
-        attachNativeKeybind(labelObj, kp, {
+        attachNativeKeybind(labelObj, kf, {
             Text = ko.Text or tostring(text),
-            Flag = kf .. "_thug",
-            Default = startKey,
+            Default = ko.Default,
             Mode = ko.Mode,
-        })
+        }, kp)
         return kp
     end
     return proxy
@@ -506,36 +510,6 @@ function ThemeManagerShim:SetLibrary() end
 function ThemeManagerShim:SetFolder() end
 function ThemeManagerShim:ApplyToTab() end
 getgenv().ThemeManager = ThemeManagerShim
-
--- ==================== Menu keybind ====================
--- sametlibs' internal menu toggle is broken (string vs EnumItem compare),
--- so we handle it ourselves using Options.MenuKeybind.Value.
-task.spawn(function()
-    while not Options.MenuKeybind do task.wait(0.1) end
-    UIS.InputBegan:Connect(function(input)
-        if UIS:GetFocusedTextBox() then return end
-        if not ThugWindow then return end
-        local target = Options.MenuKeybind.Value
-        if not target or target == "None" then return end
-        local matches = (input.KeyCode.Name == target)
-                     or (input.UserInputType.Name == target)
-        if matches then
-            local isOpen = ThugWindow.IsOpen
-            if isOpen == nil then isOpen = true end
-            pcall(function() ThugWindow:SetOpen(not isOpen) end)
-        end
-    end)
-end)
-
-if not Thug.Init then
-    function Thug:Init()
-        local path = Thug.Folders.Directory .. "/autoload.json"
-        if isfile(path) then
-            local content = readfile(path)
-            if content ~= "" then pcall(function() Thug:LoadConfig(content) end) end
-        end
-    end
-end
 
 pcall(function()
     Thug:CreateSettingsPage(ThugWindow, Watermark, KeybindList)

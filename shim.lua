@@ -8,26 +8,11 @@ local Thug = loadstring(game:HttpGet(
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 
--- ==================== Performance: skip per-element tween spam ====================
-do
-    local FakeSignal = {}
-    FakeSignal.__index = FakeSignal
-    function FakeSignal.new() return setmetatable({}, FakeSignal) end
-    function FakeSignal:Connect(cb)
-        task.defer(function() pcall(cb) end)
-        return { Disconnect = function() end, Connected = true }
-    end
-
-    Thug.FadeItem = function(self, Item, Property, Visibility, Speed)
-        return {
-            Tween = { Completed = FakeSignal.new() },
-            Info = nil,
-            Goal = nil,
-        }
-    end
-
-    Thug.Tween.Time = 0.05
-end
+-- ==================== Performance: shorten tweens (no override) ====================
+-- The library uses Tween.Time as the default duration for FadeItem and all
+-- UI tweens. 0.3 (default) causes per-element animation lag on tab switches.
+-- 0.1 keeps transitions snappy without freezing the Debounce-clear callback.
+Thug.Tween.Time = 0.1
 
 -- The library's menu check is `tostring(Input.KeyCode) == Library.MenuKeybind`,
 -- so MenuKeybind must be a STRING, not an EnumItem.
@@ -110,7 +95,6 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
--- Attach a native inline :Keybind() to a Toggle or Label handle.
 local function attachNativeKeybind(handle, flag, opts, kp)
     opts = opts or {}
 
@@ -118,8 +102,7 @@ local function attachNativeKeybind(handle, flag, opts, kp)
     if flag == "MenuKeybind" then
         initialEnum = toEnumItem(opts.Default) or Enum.KeyCode.End
     else
-        -- Backspace = the library's "no key" sentinel. Displays as None.
-        initialEnum = Enum.KeyCode.Backspace
+        initialEnum = Enum.KeyCode.Backspace  -- library "no key" sentinel
     end
 
     local ok, _, ext = pcall(function()
@@ -142,7 +125,6 @@ local function attachNativeKeybind(handle, flag, opts, kp)
     if not ok or not ext then return end
     kp._ext = ext
 
-    -- Reflect initial state
     if ext.Key then
         local display = shortName(ext.Key) or kp.Value
         if display == "Backspace" then display = "None" end
@@ -153,7 +135,6 @@ local function attachNativeKeybind(handle, flag, opts, kp)
         Thug.MenuKeybind = ext.Key
     end
 
-    -- Watch for rebinds and mode changes
     task.spawn(function()
         local lastKey = ext.Key
         local lastMode = ext.Mode
@@ -276,7 +257,6 @@ end
 -- ==================== Slider proxy ====================
 local function makeSlider(flag, section, opts)
     opts = opts or {}
-    -- Guard against Library.Round(Number, 0) → inf/nan
     local decimals = opts.Rounding
     if decimals == nil or decimals == 0 then decimals = 2 end
 
@@ -472,7 +452,7 @@ function Shim:CreateWindow(opts)
     ThugWindow = Thug:Window({
         Name = opts.Title or "Menu",
         Size = UDim2.new(0, 500, 0, 600),
-        FadeSpeed = 0.05,
+        FadeSpeed = 0.1,
     })
     Watermark   = Thug:Watermark(opts.Title or "Menu")
     KeybindList = Thug:KeybindList()
@@ -523,7 +503,6 @@ Shim.ToggleKeybind = nil
 
 getgenv().Library = Shim
 
--- ==================== Config manager stubs ====================
 local SaveManagerShim = {}
 function SaveManagerShim:SetLibrary() end
 function SaveManagerShim:SetFolder() end

@@ -8,10 +8,7 @@ local Thug = loadstring(game:HttpGet(
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 
--- ==================== Performance: shorten tweens (no override) ====================
--- The library uses Tween.Time as the default duration for FadeItem and all
--- UI tweens. 0.3 (default) causes per-element animation lag on tab switches.
--- 0.1 keeps transitions snappy without freezing the Debounce-clear callback.
+-- ==================== Performance: shorten tween duration ====================
 Thug.Tween.Time = 0.1
 
 -- The library's menu check is `tostring(Input.KeyCode) == Library.MenuKeybind`,
@@ -95,6 +92,10 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
+-- ==================== Native inline keybind ====================
+-- handle is a Toggle or Label object from the library. Both expose :Keybind().
+-- Returns Keybind (metadata) and Extension (implementation). We poll the
+-- implementation's .Key field for rebinds.
 local function attachNativeKeybind(handle, flag, opts, kp)
     opts = opts or {}
 
@@ -102,7 +103,8 @@ local function attachNativeKeybind(handle, flag, opts, kp)
     if flag == "MenuKeybind" then
         initialEnum = toEnumItem(opts.Default) or Enum.KeyCode.End
     else
-        initialEnum = Enum.KeyCode.Backspace  -- library "no key" sentinel
+        -- Backspace is the library's "no key" sentinel -> displays as "None"
+        initialEnum = Enum.KeyCode.Backspace
     end
 
     local ok, _, ext = pcall(function()
@@ -161,16 +163,17 @@ local function attachNativeKeybind(handle, flag, opts, kp)
 end
 
 -- ==================== Colorpicker proxy ====================
+-- parentLabel must be a library Label object (has :Colorpicker()).
+-- The library returns (metadata, impl). We use impl for :Set.
 local makeColorPicker
-
 makeColorPicker = function(flag, section, parentLabel, opts)
     opts = opts or {}
     local cp = {
-        Value = opts.Default or Color3.fromRGB(255,255,255),
+        Value = opts.Default or Color3.fromRGB(255, 255, 255),
         _callbacks = {},
         _section = section,
     }
-    local handle = parentLabel:Colorpicker({
+    local meta, ext = parentLabel:Colorpicker({
         Name = opts.Title or flag,
         Flag = flag .. "_thug",
         Default = cp.Value,
@@ -179,18 +182,29 @@ makeColorPicker = function(flag, section, parentLabel, opts)
             fire(cp._callbacks, c)
         end,
     })
+    -- Label:Colorpicker returns (metadata, impl) but if only metadata came back
+    -- (Toggle:Colorpicker case) fall back to checking metadata itself.
+    if not ext and meta and type(meta.Set) == "function" then
+        ext = meta
+    end
+
     function cp:SetValueRGB(c)
         self.Value = c
-        pcall(function() handle:Set(c) end)
+        if ext and type(ext.Set) == "function" then
+            pcall(function() ext:Set(c) end)
+        end
         fire(self._callbacks, c)
     end
     function cp:OnChanged(fn) table.insert(self._callbacks, fn) end
-    function cp:AddColorPicker(cf, co)
-        local lbl = self._section:Label({ Name = (co and co.Title) or cf, Alignment = "Left" })
-        return makeColorPicker(cf, self._section, lbl, co)
+    function cp:AddColorPicker(c2, co2)
+        local lbl = self._section:Label({
+            Name = (co2 and co2.Title) or c2,
+            Alignment = "Left",
+        })
+        return makeColorPicker(c2, self._section, lbl, co2)
     end
-    function cp:AddKeyPicker(kf, ko)
-        return makeKeyPickerProxy(kf, ko)
+    function cp:AddKeyPicker(kf2, ko2)
+        return makeKeyPickerProxy(kf2, ko2)
     end
     if opts.Callback then table.insert(cp._callbacks, opts.Callback) end
     Options[flag] = cp
@@ -203,6 +217,9 @@ local function makeToggle(flag, section, opts)
     local t = { Value = opts.Default == true, _callbacks = {} }
     local setting = false
 
+    local content = section.Elements and section.Elements.Content and section.Elements.Content.Instance
+    local before = content and #content:GetChildren() or 0
+
     local handle = section:Toggle({
         Name = opts.Text or flag,
         Flag = flag .. "_thug",
@@ -213,6 +230,16 @@ local function makeToggle(flag, section, opts)
             fire(t._callbacks, v)
         end,
     })
+
+    -- Capture the toggle's UI text label for SetText support
+    local textLabel
+    if content then
+        local kids = content:GetChildren()
+        if #kids > before then
+            local toggleButton = kids[#kids]
+            textLabel = toggleButton:FindFirstChildOfClass("TextLabel")
+        end
+    end
 
     function t:SetValue(v)
         v = not not v
@@ -225,7 +252,9 @@ local function makeToggle(flag, section, opts)
     end
     function t:OnChanged(fn) table.insert(self._callbacks, fn) end
     function t:SetText(s)
-        pcall(function() handle.Elements.Text.Instance.Text = s end)
+        if textLabel then
+            pcall(function() textLabel.Text = s end)
+        end
     end
 
     function t:AddKeyPicker(kf, ko)
@@ -242,21 +271,52 @@ local function makeToggle(flag, section, opts)
     t.Keybind = t.AddKeyPicker
 
     function t:AddColorPicker(cf, co)
-        local lbl = section:Label({ Name = (co and co.Title) or cf, Alignment = "Left" })
-        return makeColorPicker(cf, section, lbl, co)
+        co = co or {}
+        local cp = { Value = co.Default or Color3.fromRGB(255,255,255), _callbacks = {} }
+        local meta, ext = handle:Colorpicker({
+            Name = co.Title or cf,
+            Flag = cf .. "_thug",
+            Default = cp.Value,
+            Callback = function(c)
+                cp.Value = c
+                fire(cp._callbacks, c)
+            end,
+        })
+        if not ext and meta and type(meta.Set) == "function" then
+            ext = meta
+        end
+        function cp:SetValueRGB(c)
+            self.Value = c
+            if ext and type(ext.Set) == "function" then
+                pcall(function() ext:Set(c) end)
+            end
+            fire(self._callbacks, c)
+        end
+        function cp:OnChanged(fn) table.insert(self._callbacks, fn) end
+        function cp:AddColorPicker(c2, co2)
+            local lbl = section:Label({ Name = (co2 and co2.Title) or c2, Alignment = "Left" })
+            return makeColorPicker(c2, section, lbl, co2)
+        end
+        function cp:AddKeyPicker(kf2, ko2)
+            return makeKeyPickerProxy(kf2, ko2)
+        end
+        if co.Callback then table.insert(cp._callbacks, co.Callback) end
+        Options[cf] = cp
+        return cp
     end
     t.Colorpicker = t.AddColorPicker
 
-    if opts.Callback then table.insert(t._callbacks, opts.Callback) end
     Toggles[flag] = t
     Options[flag] = t
-    if opts.Default ~= nil then fire(t._callbacks, t.Value) end
+    -- Note: no manual fire on init. The library fires the callback itself when
+    -- Default is truthy; skipping here avoids double-firing on default-true toggles.
     return t
 end
 
 -- ==================== Slider proxy ====================
 local function makeSlider(flag, section, opts)
     opts = opts or {}
+    -- Guard against Library.Round(Number, 0) producing inf/nan
     local decimals = opts.Rounding
     if decimals == nil or decimals == 0 then decimals = 2 end
 

@@ -1,5 +1,5 @@
 -- shim.lua
--- LinoriaLib API surface over Thugsense. Uses native inline Keybind().
+-- LinoriaLib API surface over Thugsense. Snap-based tab switches (no lag spikes).
 
 local Thug = loadstring(game:HttpGet(
     "https://raw.githubusercontent.com/sametexe001/sametlibs/refs/heads/main/Thugsense/Library.lua"
@@ -7,6 +7,36 @@ local Thug = loadstring(game:HttpGet(
 
 local UIS = game:GetService("UserInputService")
 local Players = game:GetService("Players")
+
+-- ==================== Lag fix: skip per-element tweens ====================
+-- sametlibs fades every descendant of a page on tab switch. With hundreds of
+-- elements that's hundreds of TweenService:Create calls per click = spike.
+-- Replace FadeItem with a snap version that does nothing (visibility is
+-- toggled on the parent frame by the library code anyway).
+do
+    local FakeSignal = {}
+    FakeSignal.__index = FakeSignal
+    function FakeSignal.new()
+        return setmetatable({}, FakeSignal)
+    end
+    function FakeSignal:Connect(cb)
+        task.defer(function() pcall(cb) end)
+        return { Disconnect = function() end, Connected = true }
+    end
+
+    Thug.FadeItem = function(self, Item, Property, Visibility, Speed)
+        -- Do NOT touch transparency. Just return a signal that fires next frame
+        -- so the caller's post-fade callback still runs.
+        return {
+            Tween = { Completed = FakeSignal.new() },
+            Info = nil,
+            Goal = nil,
+        }
+    end
+
+    -- Shorten the fade speed used elsewhere (colorpicker open/close) too
+    Thug.Tween.Time = 0.05
+end
 
 getgenv().Toggles = {}
 getgenv().Options = {}
@@ -82,7 +112,6 @@ local function makeKeyPickerProxy(flag, opts)
     return kp
 end
 
--- Attach a native :Keybind() to an existing Thugsense element
 local function attachNativeKeybind(handle, kp, opts)
     opts = opts or {}
     local ok, ext = pcall(function()
@@ -181,7 +210,7 @@ local function makeToggle(flag, section, opts)
         if kf == "MenuKeybind" then
             startKey = toEnumItem(ko.Default) or Enum.KeyCode.End
         else
-            startKey = Enum.KeyCode.Backspace  -- displays as "None"
+            startKey = Enum.KeyCode.Backspace
         end
         attachNativeKeybind(handle, kp, {
             Text = ko.Text or (opts.Text or flag),
@@ -399,7 +428,7 @@ function Shim:CreateWindow(opts)
     ThugWindow = Thug:Window({
         Name = opts.Title or "Menu",
         Size = UDim2.new(0, 500, 0, 600),
-        FadeSpeed = 0.25,
+        FadeSpeed = 0.05,  -- reduced from 0.25
     })
     Watermark   = Thug:Watermark(opts.Title or "Menu")
     KeybindList = Thug:KeybindList()

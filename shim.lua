@@ -251,6 +251,9 @@ local function makeLabelProxy(section, text)
     function proxy:AddColorPicker(cf, co)
         return makeColorPicker(cf, raw, co or {})
     end
+    function proxy:AddKeyPicker(kf, ko)
+        return makeKeyPicker(kf, ko or {})
+    end
     return proxy
 end
 
